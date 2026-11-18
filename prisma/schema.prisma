@@ -1,0 +1,770 @@
+// Sewa Setu Appeal Management System — POC data model.
+// Dates on the simulated clock are stored as ISO strings "YYYY-MM-DD" (no time zone surprises).
+// Status values are strings; the allowed values and transitions live in src/domain/state-machines.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Masters ----------
+
+model Department {
+  code     String    @id
+  name     String
+  offices  Office[]
+  services Service[]
+}
+
+model District {
+  code    String   @id
+  name    String
+  offices Office[]
+}
+
+model Office {
+  id             String             @id
+  name           String
+  districtCode   String
+  departmentCode String
+  headOfOfficeId String?
+  district       District           @relation(fields: [districtCode], references: [code])
+  department     Department         @relation(fields: [departmentCode], references: [code])
+  users          User[]
+  mappings       AuthorityMapping[]
+  applications   Application[]
+}
+
+model User {
+  id               String  @id
+  name             String
+  role             String // CITIZEN, DPS, LINK_OFFICER, FAA, SAA, REGISTRAR, COMMISSIONER, CHIEF_COMMISSIONER, HEAD_OF_OFFICE, CALL_CENTRE, ADMIN, DEALING_ASSISTANT, SEWA_SETU_DDO, FINANCE_NODAL, FINANCE_SENIOR, COMPETENT_AUTHORITY
+  designation      String?
+  officeId         String?
+  mobile           String?
+  email            String?
+  username         String? @unique
+  password         String? // demo only, plain text by design
+  employeeId       String? @unique // links an officer to the staff records and to their penalties
+  onLeave          Boolean @default(false) // Finance nodal officers: tickets go to the backup while on leave
+  isBackup         Boolean @default(false)
+  hasDigitalAccess Boolean @default(true)
+  office           Office? @relation(fields: [officeId], references: [id])
+}
+
+model Service {
+  code                 String             @id
+  name                 String
+  purpose              String
+  timeLimitWorkingDays Int
+  documents            String // JSON: [{ name, mandatory, fetch?, group?, live? }] — see src/domain/service-config.ts
+  departmentCode       String
+  // Notified particulars (optional)
+  notificationRef      String?
+  eligibility          String? // JSON string[]
+  formFields           String? // JSON [{ key, label, required, help? }] asked in addition to name, address and purpose
+  workflow             String? // JSON step codes every application goes through, e.g. ["DA_VERIFY", "DPS_DECISION"]
+  fees                 String? // JSON [{ label, amount }]
+  maxReverts           Int? // when set, reverts are capped and a second one needs no recorded reason
+  faaDays              Int? // stipulated time for the First Appellate Authority, if notified for this service
+  saaDays              Int?
+  department           Department         @relation(fields: [departmentCode], references: [code])
+  mappings             AuthorityMapping[]
+  applications         Application[]
+}
+
+model AuthorityMapping {
+  id            String  @id @default(cuid())
+  serviceCode   String
+  officeId      String
+  dpsId         String
+  linkOfficerId String?
+  faaId         String
+  saaId         String
+  validFrom     String
+  validTo       String?
+  // Staff for internal workflow steps; the DPS stays accountable for the time limit.
+  daId          String?
+  service       Service @relation(fields: [serviceCode], references: [code])
+  office        Office  @relation(fields: [officeId], references: [id])
+}
+
+model Holiday {
+  date String @id
+  name String
+}
+
+model Setting {
+  key         String  @id
+  value       String // JSON
+  category    String
+  label       String
+  description String
+  isSwitch    Boolean @default(false)
+}
+
+model ClockState {
+  id    Int    @id @default(1)
+  today String
+}
+
+model Counter {
+  key   String @id
+  value Int
+}
+
+// ---------- Applications ----------
+
+model Application {
+  id                String                @id @default(cuid())
+  uin               String?               @unique
+  serviceCode       String
+  citizenId         String
+  officeId          String
+  formData          String // JSON
+  status            String // see ApplicationStatus
+  createdOn         String
+  submittedOn       String?
+  dueOn             String?
+  timeLimitDays     Int? // working days that applied when the application was submitted (the service may change later)
+  stage             String? // current internal workflow step, e.g. DA_VERIFY
+  systemCheck       String? // JSON result of the check against Government records
+  feeRef            String?
+  daId              String?
+  pausedWorkingDays Int                   @default(0)
+  queryCount        Int                   @default(0)
+  heldOn            String?
+  flaggedToHoO      Boolean               @default(false)
+  releasedOn        String?
+  releaseReason     String?
+  deliveredOn       String?
+  deliveryRef       String?
+  rejectedOn        String?
+  rejectionReasons  String?
+  closedOn          String?
+  closeReason       String?
+  confirmedOn       String?
+  confirmedVia      String?
+  dpsId             String
+  linkOfficerId     String?
+  faaId             String
+  saaId             String
+  scenario          String?
+  service           Service               @relation(fields: [serviceCode], references: [code])
+  office            Office                @relation(fields: [officeId], references: [id])
+  documents         ApplicationDocument[]
+  infoRequests      InfoRequest[]
+  ledger            LedgerEntry[]
+  appeals           Appeal[]
+}
+
+model ApplicationDocument {
+  id            String      @id @default(cuid())
+  applicationId String
+  name          String
+  fileName      String
+  source        String // UPLOAD | DIGILOCKER_MOCK
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model InfoRequest {
+  id                  String      @id @default(cuid())
+  applicationId       String
+  raisedById          String
+  raisedOn            String
+  items               String // JSON string[]
+  secondRequestReason String?
+  respondedOn         String?
+  response            String?
+  application         Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model Handover {
+  id              String @id @default(cuid())
+  fromDpsId       String
+  toLinkOfficerId String
+  officeId        String
+  startOn         String
+  endOn           String
+  recordedOn      String
+  recordedById    String
+  reason          String
+}
+
+model LedgerEntry {
+  id            String      @id @default(cuid())
+  applicationId String
+  officerId     String
+  capacity      String // DPS | LINK_OFFICER | SUCCESSOR
+  fromOn        String
+  toOn          String?
+  source        String // ASSIGNMENT | HANDOVER | TRANSFER
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+// ---------- Appeals ----------
+
+model Appeal {
+  id                 String            @id @default(cuid())
+  appealNo           String            @unique
+  applicationId      String
+  level              String // FAA | SAA | TAA
+  ground             String // DELAY | REJECTION
+  origin             String // AUTO_DRAFT | CITIZEN | ASSISTED | AUTO_ESCALATED | REMANDED
+  parentAppealId     String?
+  status             String
+  authorityId        String?
+  draftCreatedOn     String?
+  linkToken          String?
+  linkExpiresOn      String?
+  filedOn            String?
+  filedById          String?
+  groundsText        String?
+  reliefSought       String?
+  windowStartOn      String?
+  windowEndsOn       String?
+  isLate             Boolean           @default(false)
+  lateReason         String?
+  lateDecision       String? // ACCEPTED | REFUSED
+  deadlineOn         String?
+  extendedDeadlineOn String?
+  extensionReason    String?
+  remandCycle        Int               @default(0)
+  remandDueOn        String?
+  decidedOn          String?
+  closedOn           String?
+  reopenCount        Int               @default(0)
+  declinedOn         String?
+  declineReason      String?
+  scrutinyNote       String?
+  application        Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  missedDeadlines    MissedDeadline[]
+  replies            RespondentReply[]
+  hearings           Hearing[]
+  orders             Order[]
+  votes              Vote[]
+  bench              Bench?
+  directions         Direction[]
+  penalties          Penalty[]
+}
+
+model MissedDeadline {
+  id                  String  @id @default(cuid())
+  appealId            String
+  level               String
+  authorityId         String
+  deadlineOn          String
+  detectedOn          String
+  escalatedToAppealId String?
+  appeal              Appeal  @relation(fields: [appealId], references: [id], onDelete: Cascade)
+}
+
+model RespondentReply {
+  id          String  @id @default(cuid())
+  appealId    String
+  dpsId       String
+  requestedOn String
+  dueOn       String
+  submittedOn String?
+  text        String?
+  appeal      Appeal  @relation(fields: [appealId], references: [id], onDelete: Cascade)
+}
+
+model Hearing {
+  id                String  @id @default(cuid())
+  appealId          String
+  scheduledOn       String
+  timeSlot          String
+  mode              String // ONLINE | IN_PERSON
+  inPersonReason    String?
+  noticeServedOn    String
+  shortNoticeReason String?
+  videoLink         String?
+  status            String // SCHEDULED | HELD | ADJOURNED | CANCELLED
+  attendance        String? // JSON
+  notes             String?
+  appeal            Appeal  @relation(fields: [appealId], references: [id], onDelete: Cascade)
+}
+
+model Bench {
+  id            String @id @default(cuid())
+  appealId      String @unique
+  memberIds     String // JSON string[]
+  presidingId   String
+  constitutedOn String
+  appeal        Appeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
+}
+
+model Vote {
+  id        String  @id @default(cuid())
+  appealId  String
+  memberId  String
+  position  String // ALLOW | DISMISS | REMAND
+  note      String?
+  castOn    String
+  isCasting Boolean @default(false)
+  appeal    Appeal  @relation(fields: [appealId], references: [id], onDelete: Cascade)
+}
+
+model Order {
+  id                         String  @id @default(cuid())
+  orderNo                    String  @unique
+  appealId                   String
+  level                      String
+  templateCode               String
+  outcome                    String // ALLOWED | DISMISSED | REJECTION_SET_ASIDE | REMANDED | LATE_NOT_CONDONED
+  findings                   String
+  reasons                    String
+  directionText              String?
+  directionDays              Int?
+  noPenaltyReason            String?
+  penaltyPlan                String? // JSON [{officerId, capacity, amount}]
+  disciplinaryRecommendation String?
+  majority                   String? // JSON
+  dissent                    String?
+  status                     String // DRAFT | SIGNED | AUTHENTICATED
+  draftedById                String
+  draftedOn                  String
+  signedById                 String?
+  signedOn                   String?
+  esignRef                   String?
+  authenticatedById          String?
+  authenticatedOn            String?
+  appeal                     Appeal  @relation(fields: [appealId], references: [id], onDelete: Cascade)
+}
+
+model Direction {
+  id            String  @id @default(cuid())
+  orderId       String
+  appealId      String
+  applicationId String
+  kind          String // DELIVER | DECIDE_ON_REMAND
+  assigneeId    String
+  issuedOn      String
+  dueOn         String
+  status        String // OPEN | MET | MISSED | SUPERSEDED
+  metOn         String?
+  deliveryRef   String?
+  appeal        Appeal  @relation(fields: [appealId], references: [id], onDelete: Cascade)
+}
+
+// ---------- Penalty payment and recovery (PLAN.md Part 2) ----------
+// Recovery is central: the Sewa Setu DDO and the Finance nodal officer, not the officer's own DDO.
+// Status values and transitions live in src/domain/penalty-machine.ts.
+
+/// Mock of the State staff records system (an external system; read through src/adapters/staff-records.ts).
+model StaffRecord {
+  employeeId           String  @id
+  name                 String
+  designation          String
+  office               String
+  monthlyPay           Int
+  payrollType          String // STATE | DEPUTATION_OUTSIDE | ULB | AUTONOMOUS | PSU | CONTRACTUAL
+  retirementOn         String?
+  status               String // ACTIVE | SUSPENDED | RETIRED | RESIGNED | DISMISSED | DECEASED
+  competentAuthorityId String?
+}
+
+model Penalty {
+  id                   String              @id @default(cuid())
+  ref                  String              @unique // PEN-2026-000123, encoded in the eGRAS QR
+  orderId              String
+  appealId             String
+  officerId            String
+  // Snapshot of the officer at imposition; recovery follows the employee ID, not the post.
+  employeeId           String
+  officerName          String
+  designation          String
+  office               String
+  capacity             String // DPS | LINK_OFFICER | SUCCESSOR | FAA | SAA
+  imposedByLevel       String // FAA | SAA | TAA
+  imposedById          String
+  competentAuthorityId String?
+  uin                  String
+  appealNo             String
+  originalAmount       Int
+  amount               Int // current amount after any reduction or set-aside
+  orderDate            String
+  // Deemed service: posted on the dashboard and an SMS or email sent. Both moments are recorded.
+  dashboardPostedOn    String
+  dashboardPostedAt    String
+  messageSentOn        String?
+  messageSentAt        String?
+  serviceDate          String
+  firstViewedOn        String?
+  firstViewedAt        String?
+  dueOn                String // last date to pay through eGRAS
+  status               String
+  priorStatus          String? // status to return to when a stay is lifted
+  qrActive             Boolean             @default(true)
+  headOfAccount        String
+  doubleRecovery       Boolean             @default(false)
+  retirementAlertOn    String?
+  overdueOn            String?
+  unpaidConfirmedOn    String?
+  closedOn             String?
+  delayDaysAttributed  Int                 @default(0)
+  appeal               Appeal              @relation(fields: [appealId], references: [id], onDelete: Cascade)
+  grns                 PaymentGRN[]
+  directions           RecoveryDirection[]
+  lines                TicketLine[]
+  deductions           Deduction[]
+  refunds              Refund[]
+  stays                Stay[]
+  adjustments          Adjustment[]
+  exceptions           ExceptionCase[]
+  writeOffs            WriteOff[]
+}
+
+/// eGRAS receipt (GRN). PENDING until it settles on the simulated clock.
+model PaymentGRN {
+  grn        String   @id
+  scannedRef String
+  penaltyId  String?
+  amount     Int
+  channel    String // QR | CHALLAN
+  paidOn     String
+  paidAt     String
+  settlesOn  String
+  status     String // PENDING | SUCCESS | FAILED
+  forceFail  Boolean  @default(false)
+  settledOn  String?
+  penalty    Penalty? @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+}
+
+model RecoveryDirection {
+  id                   String  @id @default(cuid())
+  penaltyId            String
+  mode                 String // STANDING | PER_CASE
+  reference            String?
+  status               String // AWAITING_SIGNATURE | IN_PLACE
+  competentAuthorityId String?
+  sentOn               String
+  signedOn             String?
+  esignRef             String?
+  remindersSent        Int     @default(0)
+  penalty              Penalty @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+}
+
+/// One open ticket per officer (employee ID), one line per UIN.
+model Ticket {
+  id          String       @id @default(cuid())
+  ticketNo    String       @unique
+  employeeId  String
+  officerId   String
+  status      String // OPEN | CLOSED
+  assigneeId  String
+  bothOnLeave Boolean      @default(false)
+  priority    String       @default("NORMAL") // NORMAL | RETIREMENT
+  createdOn   String
+  plan        String // JSON [{ month, amount, dueOn }]
+  escalatedOn String?
+  closedOn    String?
+  lines       TicketLine[]
+}
+
+model TicketLine {
+  id        String  @id @default(cuid())
+  ticketId  String
+  penaltyId String
+  amount    Int
+  status    String // ACTIVE | ON_HOLD | REMOVED | DONE
+  note      String?
+  addedOn   String
+  ticket    Ticket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  penalty   Penalty @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+}
+
+model Deduction {
+  id              String  @id @default(cuid())
+  penaltyId       String
+  ticketLineId    String?
+  kind            String // SALARY | PENSION | MANUAL
+  payrollRef      String
+  salaryMonth     String // YYYY-MM
+  amount          Int
+  voucherNo       String
+  proofFile       String
+  recordedById    String
+  recordedOn      String
+  verification    String  @default("SUBMITTED") // SUBMITTED | VERIFIED | RETURNED
+  returnReason    String?
+  verifiedById    String?
+  verifiedOn      String?
+  credit          String  @default("AWAITED") // AWAITED | CREDITED | MISSING | ESCALATED
+  creditedOn      String?
+  creditMissingOn String?
+  escalatedOn     String?
+  penalty         Penalty @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+}
+
+/// Mock treasury credit feed: credits to the head of account, arriving some days after a deduction.
+model CreditFeedEntry {
+  id            String  @id @default(cuid())
+  voucherNo     String
+  amount        Int
+  headOfAccount String
+  expectedOn    String
+  arrivedOn     String?
+  dropped       Boolean @default(false)
+  deductionId   String?
+}
+
+model Refund {
+  id         String  @id @default(cuid())
+  penaltyId  String
+  reason     String // DOUBLE_RECOVERY | EXCESS_PAYMENT | REDUCED | SET_ASIDE
+  amount     Int
+  status     String // DUE | REFUNDED
+  assigneeId String?
+  reference  String?
+  createdOn  String
+  refundedOn String?
+  penalty    Penalty @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+}
+
+model Stay {
+  id            String  @id @default(cuid())
+  penaltyId     String
+  authority     String // HIGHER_AUTHORITY | COMMISSION | COURT
+  orderRef      String
+  documentName  String
+  recordedById  String
+  startOn       String
+  liftedOn      String?
+  priorStatus   String
+  daysRemaining Int?
+  penalty       Penalty @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+}
+
+/// Reductions and set-asides on review, appeal or by a court.
+model Adjustment {
+  id           String  @id @default(cuid())
+  penaltyId    String
+  kind         String // REDUCED | SET_ASIDE
+  fromAmount   Int
+  toAmount     Int
+  byAuthority  String
+  orderRef     String
+  documentName String
+  recordedById String
+  recordedOn   String
+  penalty      Penalty @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+}
+
+model ExceptionCase {
+  id         String   @id @default(cuid())
+  penaltyId  String?
+  grn        String?
+  kind       String // NOT_ON_STATE_PAYROLL | RETIRED_NO_PENSION | RESIGNED | DISMISSED | DECEASED | SUSPENDED | STAFF_RECORD_MISMATCH | UNMATCHED_PAYMENT
+  status     String // OPEN | RESOLVED
+  note       String?
+  letterRef  String?
+  letterOn   String?
+  replyRef   String?
+  replyOn    String?
+  proofFile  String?
+  resolution String?
+  openedOn   String
+  resolvedOn String?
+  penalty    Penalty? @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+}
+
+model WriteOff {
+  id            String  @id @default(cuid())
+  penaltyId     String
+  amount        Int
+  reason        String
+  requestedById String
+  requestedOn   String
+  status        String // REQUESTED | APPROVED | REJECTED
+  decidedById   String?
+  decidedOn     String?
+  decisionNote  String?
+  esignRef      String?
+  penalty       Penalty @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+}
+
+model MonthlyStatement {
+  month       String @id // YYYY-MM
+  generatedOn String
+  rows        String // JSON, one row per penalty
+  totals      String // JSON
+}
+
+/// Follow-up work for the Finance nodal officer: stop a deduction, chase a missing credit, and so on.
+model Task {
+  id         String  @id @default(cuid())
+  kind       String // STOP_DEDUCTION | CREDIT_FOLLOW_UP | DIRECTION_REMINDER
+  assigneeId String
+  penaltyId  String?
+  ticketId   String?
+  dueOn      String?
+  status     String // OPEN | DONE
+  text       String
+  createdOn  String
+  doneOn     String?
+}
+
+// ---------- Cross-cutting ----------
+
+model Notification {
+  id             String  @id @default(cuid())
+  recipientId    String?
+  recipientLabel String
+  channel        String // SMS | EMAIL | DASHBOARD
+  address        String?
+  text           String
+  sentOn         String
+  seq            Int
+  entityType     String?
+  entityId       String?
+  caseRef        String?
+}
+
+// Append-only: SQLite triggers in the migration refuse UPDATE and DELETE (except during a demo reset).
+model AuditEvent {
+  id           Int     @id @default(autoincrement())
+  simDate      String
+  realTs       String
+  actorId      String
+  actorName    String
+  actorRole    String
+  action       String
+  entityType   String
+  entityId     String
+  caseRef      String?
+  beforeStatus String?
+  afterStatus  String?
+  outcome      String // OK | REFUSED
+  details      String?
+}
+
+model AuditGuard {
+  id       Int     @id @default(1)
+  unlocked Boolean @default(false)
+}
+
+model DelayFlag {
+  officerId  String  @id
+  computedOn String
+  delayed    Int
+  total      Int
+  ratio      Float
+  isFlagged  Boolean
+}
+
+model SchedulerRun {
+  id      Int    @id @default(autoincrement())
+  simDate String
+  summary String // JSON
+}
+
+// ---- Master Data Management (MDM) layer ----
+// Local copy of MDM masters, as the MDM integration contract asks: same UUIDs and codes as MDM, the full record as
+// JSON, refreshed by version (GET /mdm/changes, or a snapshot when the change log has been pruned). AMS reads its
+// copy; it never writes masters back to MDM.
+
+model MdmRecord {
+  id         String  @id // MDM UUID
+  entityType String // district, office, service, holiday, ...
+  code       String
+  name       String?
+  isActive   Boolean
+  mdmVersion Int
+  payload    String // JSON: the full MDM record
+  syncedAt   String
+
+  @@unique([entityType, code])
+  @@index([entityType])
+}
+
+model MdmSyncState {
+  entityType     String  @id
+  appliedVersion Int     @default(0)
+  lastSyncAt     String?
+  lastError      String?
+}
+
+model MdmSyncRun {
+  id          String  @id @default(cuid())
+  startedAt   String
+  finishedAt  String?
+  mode        String // CHANGES | SNAPSHOT | UP_TO_DATE | FAILED
+  fromVersion Int
+  toVersion   Int?
+  applied     Int     @default(0)
+  error       String?
+  actorId     String
+}
+
+// ---- HR Utility layer ----
+// Who held a seat at a time comes from the HR Utility (postings, function allotments, leave, Link Officer rules).
+// Each answer AMS relies on is kept with the MDM version it reflected, so a decision can be explained later.
+
+model HrResolution {
+  id            String  @id @default(cuid())
+  askedAt       String // real time of the call
+  at            String // time the question was about (ISO, IST)
+  officeCode    String // MDM office code
+  postCode      String // MDM designation code
+  functionCode  String
+  status        String // RESOLVED | NO_LINK_OFFICER | NOT_APPLICABLE | NO_HOLDER | NOT_IN_HR | ERROR
+  employeeId    String? // the officer AMS would use: first available holder, else the Link Officer
+  employeeName  String?
+  capacity      String? // HOLDER | LINK_OFFICER
+  chairId       String? // sanctioned post id
+  reason        String?
+  mdmVersion    Int?
+  response      String // JSON as returned
+  purpose       String // READINESS | LEDGER | LOOKUP
+  applicationId String?
+
+  @@index([officeCode, postCode, at])
+}
+
+model HrEvent {
+  id          Int     @id // HR outbox id (increasing, never reused)
+  type        String
+  ts          String
+  effectiveAt String
+  employeeId  String?
+  officeCode  String?
+  postCode    String?
+  isDemo      Boolean
+  payload     String
+  receivedAt  String
+}
+
+model HrEventCursor {
+  id        Int     @id @default(1)
+  lastId    Int     @default(0)
+  polledAt  String?
+  lastError String?
+}
+
+// ---- Service systems (Rule Engine resolutions) ----
+// An application decided in a service system (e.g. Minority Community Certificate) and brought into AMS for appeal.
+// The service system owns the application and the Rule Engine's resolution; AMS keeps the snapshot it imported.
+
+model ExternalApplication {
+  applicationId String  @id // AMS Application.id
+  source        String // service system, e.g. MCC
+  externalNo    String // its application number
+  importedAt    String
+  importedById  String
+  refreshedAt   String?
+  status        String // status in the source system when last read
+  appealGrounds String // JSON: REJECTED | OVERDUE
+  resolutionIds String // JSON: Rule Engine resolution ids behind the persons
+  ruleCode      String?
+  ruleVersion   Int?
+  mdmVersion    Int?
+  snapshot      String // JSON as returned by GET /ams/applications/:no
+
+  @@unique([source, externalNo])
+}
